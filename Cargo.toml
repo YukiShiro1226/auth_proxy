@@ -1,0 +1,10 @@
+[package]
+name = "auth_proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+base64 = "0.22.1"
+httparse = "1.10.1"
+tokio = { version = "1.49.0", features = ["full"] }
