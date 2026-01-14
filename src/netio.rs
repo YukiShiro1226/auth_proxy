@@ -1,6 +1,5 @@
 use anyhow::{bail, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio::net::TcpStream;
 
 pub struct PrefixedStream<S> {
     inner: S,
@@ -55,7 +54,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
     }
 }
 
-pub async fn read_header_and_leftover(stream: &mut TcpStream, max: usize) -> Result<(Vec<u8>, Vec<u8>)> {
+pub async fn read_header_and_leftover<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    max: usize,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 2048];
 
@@ -66,7 +68,7 @@ pub async fn read_header_and_leftover(stream: &mut TcpStream, max: usize) -> Res
 
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
-            bail!("client closed before sending full header");
+            bail!("peer closed before sending full header");
         }
         buf.extend_from_slice(&tmp[..n]);
 

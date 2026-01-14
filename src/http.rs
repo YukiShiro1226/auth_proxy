@@ -11,27 +11,70 @@ pub struct ParsedReq<'a> {
     pub path: Option<&'a str>,
 }
 
+pub struct ParsedResp<'a> {
+    pub code: Option<u16>,
+    pub reason: Option<&'a str>,
+}
+
 pub fn parse_request(header: &[u8]) -> Result<(ParsedReq<'_>, Vec<(String, Vec<u8>)>)> {
     let mut headers_arr = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers_arr);
 
     match req.parse(header)? {
         Status::Complete(_) => {}
-        Status::Partial => bail!("incomplete header"),
+        Status::Partial => bail!("incomplete request header"),
     }
-
-    let method = req.method;
-    let path = req.path;
 
     let mut headers = Vec::new();
     for h in req.headers.iter() {
-        if h.name.is_empty() {
-            continue;
+        if !h.name.is_empty() {
+            headers.push((h.name.to_string(), h.value.to_vec()));
         }
-        headers.push((h.name.to_string(), h.value.to_vec()));
     }
 
-    Ok((ParsedReq { method, path }, headers))
+    Ok((ParsedReq { method: req.method, path: req.path }, headers))
+}
+
+pub fn parse_response(header: &[u8]) -> Result<(ParsedResp<'_>, Vec<(String, Vec<u8>)>)> {
+    let mut headers_arr = [httparse::EMPTY_HEADER; 64];
+    let mut resp = httparse::Response::new(&mut headers_arr);
+
+    match resp.parse(header)? {
+        Status::Complete(_) => {}
+        Status::Partial => bail!("incomplete response header"),
+    }
+
+    let mut headers = Vec::new();
+    for h in resp.headers.iter() {
+        if !h.name.is_empty() {
+            headers.push((h.name.to_string(), h.value.to_vec()));
+        }
+    }
+
+    Ok((ParsedResp { code: resp.code, reason: resp.reason }, headers))
+}
+
+pub fn header_value<'a>(headers: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_slice())
+}
+
+pub fn header_value_string(headers: &[(String, Vec<u8>)], name: &str) -> Option<String> {
+    header_value(headers, name).map(|v| String::from_utf8_lossy(v).trim().to_string())
+}
+
+pub fn content_length(headers: &[(String, Vec<u8>)]) -> Option<usize> {
+    let v = header_value(headers, "Content-Length")?;
+    let s = String::from_utf8_lossy(v).trim().to_string();
+    s.parse::<usize>().ok()
+}
+
+pub fn is_chunked(headers: &[(String, Vec<u8>)]) -> bool {
+    let Some(v) = header_value(headers, "Transfer-Encoding") else { return false };
+    let s = String::from_utf8_lossy(v).to_ascii_lowercase();
+    s.split(',').any(|p| p.trim() == "chunked")
 }
 
 pub fn is_authorized(headers: &[(String, Vec<u8>)], creds: &Creds) -> Result<bool> {
@@ -108,13 +151,12 @@ pub fn parse_connect_authority(authority: &str) -> Result<(String, u16)> {
 pub struct HttpTarget {
     pub host: String,
     pub port: u16,
-    pub path: String,       // origin-form path (/... or /?...)
+    pub path: String,
     pub host_header: String,
     pub is_https: bool,
 }
 
 pub fn parse_http_target(path: &str, headers: &[(String, Vec<u8>)]) -> Result<HttpTarget> {
-    // absolute-form: http://host[:port]/path
     if let Some(rest) = path.strip_prefix("http://") {
         let (authority, origin_path) = split_authority_and_path(rest);
         let (host, port) = parse_host_port(authority, 80)?;
@@ -129,8 +171,6 @@ pub fn parse_http_target(path: &str, headers: &[(String, Vec<u8>)]) -> Result<Ht
     }
 
     if path.starts_with("https://") {
-        // We intentionally do not implement https absolute-form here.
-        // Clients should use CONNECT for https://
         return Ok(HttpTarget {
             host: "".to_string(),
             port: 443,
@@ -140,7 +180,6 @@ pub fn parse_http_target(path: &str, headers: &[(String, Vec<u8>)]) -> Result<Ht
         });
     }
 
-    // origin-form: path starts with /, use Host header
     let host_hdr = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("Host"))
@@ -169,7 +208,6 @@ fn split_authority_and_path(rest: &str) -> (&str, &str) {
 }
 
 fn parse_host_port(authority: &str, default_port: u16) -> Result<(String, u16)> {
-    // simple "host" or "host:port" (no IPv6 bracket support in this compact version)
     if let Some((h, p)) = authority.rsplit_once(':') {
         if let Ok(port) = p.parse::<u16>() {
             return Ok((h.to_string(), port));
@@ -185,7 +223,6 @@ pub fn build_forwarded_request(
 ) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(1024);
 
-    // Request line (origin-form)
     out.extend_from_slice(method.as_bytes());
     out.extend_from_slice(b" ");
     out.extend_from_slice(target.path.as_bytes());
@@ -194,7 +231,6 @@ pub fn build_forwarded_request(
     let mut saw_host = false;
 
     for (k, v) in headers {
-        // Strip proxy-only / connection headers
         if k.eq_ignore_ascii_case("Proxy-Authorization")
             || k.eq_ignore_ascii_case("Proxy-Connection")
             || k.eq_ignore_ascii_case("Connection")
@@ -223,7 +259,6 @@ pub fn build_forwarded_request(
         out.extend_from_slice(b"\r\n");
     }
 
-    // Keep it simple: one request per connection
     out.extend_from_slice(b"Connection: close\r\n");
     out.extend_from_slice(b"\r\n");
     Ok(out)
